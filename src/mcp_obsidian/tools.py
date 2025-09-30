@@ -7,7 +7,8 @@ from mcp.types import (
 )
 import json
 import os
-from . import obsidian
+import re
+from . import obsidian, server
 
 api_key = os.getenv("OBSIDIAN_API_KEY", "")
 obsidian_host = os.getenv("OBSIDIAN_HOST", "127.0.0.1")
@@ -421,18 +422,247 @@ class ComplexSearchToolHandler(ToolHandler):
        )
 
    def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
-       if "query" not in args:
+       query_param = args.get("query")
+
+       if query_param is None:
            raise RuntimeError("query argument missing in arguments")
 
-       api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
-       results = api.search_json(args.get("query", ""))
+       actual_query_dict: dict
+       if isinstance(query_param, str):
+           try:
+               actual_query_dict = json.loads(query_param)
+           except json.JSONDecodeError as e:
+               raise RuntimeError(f"query parameter is a string but not valid JSON: {query_param}")
+       elif isinstance(query_param, dict):
+           actual_query_dict = query_param
+       else:
+           server.logger.warning(f"query parameter has unexpected type: {type(query_param)}. Query: {query_param}")
+           raise RuntimeError(f"query argument has unexpected type: {type(query_param)}. Expected dict or JSON string.")
 
+       api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
+       results = api.search_json(actual_query_dict)
+       
        return [
            TextContent(
                type="text",
                text=json.dumps(results, indent=2)
            )
        ]
+
+class DataviewQueryToolHandler(ToolHandler):
+    def __init__(self):
+        super().__init__("obsidian_dataview_query") # New function
+
+    def get_tool_description(self):
+        return Tool(
+            name=self.name,
+            description="Executes a Dataview query against Obsidian notes and returns the results as JSON. Supports GROUP BY by post-processing results on the server.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The Dataview query string (e.g., TABLE title, status FROM \"some/path\" WHERE condition). Note: It does not support TABLE WITHOUT ID queries."
+                    }
+                },
+                "required": ["query"]
+            }
+        )
+
+    def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
+        dataview_query_string = args.get("query")
+
+        if not dataview_query_string or not isinstance(dataview_query_string, str):
+            raise RuntimeError("query argument (string) missing or invalid in arguments for Dataview")
+
+        base_query, group_fields = self._extract_group_by_clause(dataview_query_string)
+        execute_query = base_query if group_fields else dataview_query_string
+        if group_fields:
+            server.logger.debug(
+                "obsidian_dataview_query: GROUP BY rewritten",
+                extra={
+                    "group_by": group_fields,
+                    "rewritten_query": execute_query
+                }
+            )
+        else:
+            server.logger.debug(
+                "obsidian_dataview_query: no GROUP BY detected",
+                extra={
+                    "query": dataview_query_string
+                }
+            )
+
+        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
+        try:
+            results = api.dataview_query_execute(execute_query)
+        except Exception as exc:
+            if group_fields:
+                debug_payload = json.dumps({
+                    "groupBy": group_fields,
+                    "rewrittenQuery": execute_query,
+                    "originalQuery": dataview_query_string,
+                    "error": str(exc)
+                }, ensure_ascii=False)
+                raise Exception(
+                    f"Dataview query failed after GROUP BY rewrite: {debug_payload}"
+                ) from exc
+            raise
+
+        if group_fields and isinstance(results, list):
+            column_alias_map = self._parse_table_columns(dataview_query_string)
+            grouped_payload = self._group_results(results, group_fields, column_alias_map)
+            payload = {
+                "grouped": True,
+                "groupBy": group_fields,
+                "groups": grouped_payload
+            }
+        else:
+            payload = results
+
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps(payload, indent=2)
+            )
+        ]
+
+    def _extract_group_by_clause(self, query: str) -> tuple[str, list[str]]:
+        lowered = query.lower()
+        marker = 'group by'
+        idx = lowered.find(marker)
+        if idx == -1:
+            return query, []
+
+        group_part = query[idx + len(marker):]
+        base_query = query[:idx].rstrip()
+        expressions = self._split_expressions(group_part)
+        cleaned = [expr for expr in (expr.strip() for expr in expressions) if expr]
+        return base_query, cleaned
+
+    def _split_expressions(self, text: str) -> list[str]:
+        parts = []
+        current = []
+        depth = 0
+        in_quote = False
+        quote_char = ""
+
+        for idx, ch in enumerate(text):
+            if in_quote:
+                current.append(ch)
+                if ch == quote_char and (idx == 0 or text[idx - 1] != "\\"):
+                    in_quote = False
+                continue
+
+            if ch in ('"', "'"):
+                in_quote = True
+                quote_char = ch
+                current.append(ch)
+                continue
+
+            if ch in "([{":
+                depth += 1
+                current.append(ch)
+                continue
+
+            if ch in ")]}":
+                depth = max(0, depth - 1)
+                current.append(ch)
+                continue
+
+            if ch == ',' and depth == 0:
+                parts.append(''.join(current).strip())
+                current = []
+                continue
+
+            if ch in '\n;':
+                current.append(ch)
+                continue
+
+            current.append(ch)
+
+        if current:
+            parts.append(''.join(current).strip())
+
+        return parts
+
+    def _parse_table_columns(self, query: str) -> dict[str, str]:
+        match = re.search(r"(?is)\bTABLE\b(.*?)\bFROM\b", query)
+        if not match:
+            return {}
+
+        columns_segment = match.group(1)
+        columns = self._split_expressions(columns_segment)
+        alias_map: dict[str, str] = {}
+
+        for column in columns:
+            if not column:
+                continue
+            parts = re.split(r"(?is)\s+AS\s+", column, maxsplit=1)
+            expr = parts[0].strip()
+            alias = parts[1].strip() if len(parts) > 1 else expr
+            normal_expr = self._normalize_reference(expr)
+            normal_alias = self._normalize_reference(alias)
+            alias_map[normal_expr] = alias.strip('"')
+            alias_map[normal_alias] = alias.strip('"')
+
+        return alias_map
+
+    def _normalize_reference(self, value: str) -> str:
+        trimmed = value.strip()
+        if trimmed.startswith('"') and trimmed.endswith('"'):
+            trimmed = trimmed[1:-1]
+        if trimmed.startswith("'") and trimmed.endswith("'"):
+            trimmed = trimmed[1:-1]
+        trimmed = re.sub(r"\s+", " ", trimmed)
+        return trimmed.lower()
+
+    def _resolve_alias(self, expression: str, alias_map: dict[str, str]) -> str:
+        normalized = self._normalize_reference(expression)
+        return alias_map.get(normalized, expression.strip())
+
+    def _resolve_value(self, row_result: dict, alias: str, expression: str):
+        candidates = [alias, expression.strip()]
+        for candidate in candidates:
+            if candidate in row_result:
+                return row_result[candidate]
+        return None
+
+    def _make_hashable(self, value):
+        if isinstance(value, list):
+            return tuple(self._make_hashable(v) for v in value)
+        if isinstance(value, dict):
+            return tuple(sorted((k, self._make_hashable(v)) for k, v in value.items()))
+        return value
+
+    def _group_results(self, rows: list[dict], group_fields: list[str], alias_map: dict[str, str]) -> list[dict]:
+        grouped: dict[tuple, dict] = {}
+
+        for row in rows:
+            row_result = row.get("result", {})
+            group_labels = {}
+            key_components = []
+
+            for expression in group_fields:
+                alias = self._resolve_alias(expression, alias_map)
+                value = self._resolve_value(row_result, alias, expression)
+                group_labels[alias] = value
+                key_components.append(self._make_hashable(value))
+
+            key = tuple(key_components)
+
+            if key not in grouped:
+                grouped[key] = {
+                    "group": group_labels,
+                    "rows": []
+                }
+
+            grouped[key]["rows"].append(row)
+
+        for entry in grouped.values():
+            entry["count"] = len(entry["rows"])
+
+        return list(grouped.values())
 
 class BatchGetFileContentsToolHandler(ToolHandler):
     def __init__(self):
