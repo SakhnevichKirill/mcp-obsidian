@@ -1,5 +1,71 @@
 components:
   schemas:
+    DataviewJsBlock:
+      description: "Top-level HTML elements produced by the DataviewJS render."
+      properties:
+        attributes:
+          additionalProperties:
+            type: "string"
+          type: "object"
+        html:
+          type: "string"
+        tag:
+          type: "string"
+        text:
+          type: "string"
+      required:
+        - "tag"
+        - "html"
+      type: "object"
+    DataviewJsRequest:
+      description: "Payload for executing DataviewJS code."
+      properties:
+        code:
+          description: "Raw DataviewJS to execute (exactly as you would inside Obsidian)."
+          type: "string"
+        filePath:
+          description: "Note path to use as the Dataview execution context (defaults to the active file)."
+          type: "string"
+        timeoutMs:
+          description: "Override the timeout in milliseconds. Defaults to 15000, or set to 0 to disable."
+          minimum: 0
+          type: "number"
+      required:
+        - "code"
+      type: "object"
+    DataviewJsResponse:
+      description: "Rendered output returned by the DataviewJS execution endpoint."
+      properties:
+        blocks:
+          description: "Serialized list of top-level elements returned by Dataview."
+          items:
+            "$ref": "#/components/schemas/DataviewJsBlock"
+          type: "array"
+        filePath:
+          description: "File path used as Dataview execution context."
+          type: "string"
+        html:
+          description: "Rendered HTML of the DataviewJS container."
+          type: "string"
+        source:
+          properties:
+            type:
+              enum:
+                - "code"
+              type: "string"
+            value:
+              type: "string"
+          required:
+            - "type"
+          type: "object"
+        text:
+          description: "Plain-text content extracted from the rendered container."
+          type: "string"
+      required:
+        - "source"
+        - "html"
+        - "text"
+      type: "object"
     Error:
       properties:
         errorCode:
@@ -490,6 +556,69 @@ paths:
         Execute a command.
       tags:
         - "Commands"
+  /dataviewjs/:
+    post:
+      description: |
+        Execute DataviewJS code and return the rendered output. Provide the exact script you would run inside Obsidian, optionally overriding the execution `filePath` or timeout.
+      requestBody:
+        content:
+          application/json:
+            examples:
+              run_code:
+                summary: "Execute inline DataviewJS code"
+                value:
+                  code: "dv.list([1, 2, 3])"
+              run_code_args:
+                summary: "Call dv.view from within code"
+                value:
+                  code: "await dv.view(\"02_Core/Journey_Map/_EXAMPLES/views/signal_source_flow_dashboard\", { status: 'active' })"
+                  filePath: "02_Core/Journey_Map/_EXAMPLES/Flows/signal_source_setup.md"
+                  timeoutMs: 30000
+            schema:
+              "$ref": "#/components/schemas/DataviewJsRequest"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/DataviewJsResponse"
+          description: "Rendered HTML/text output returned successfully."
+        "400":
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+          description: |
+            The provided DataviewJS payload could not be processed (invalid JSON or missing `code`).
+        "401":
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+          description: |
+            Requests to this endpoint require an API Key to be specified
+            in the 'Authorization' header using the value 'Bearer <API_KEY>'.
+        "422":
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Error"
+          description: |
+            DataviewJS execution failed (for example, Dataview is disabled for the referenced file or the script threw an error).
+      summary: |
+        Execute DataviewJS code
+      tags:
+        - "Search"
+  /obsidian-local-rest-api.crt:
+    get:
+      responses:
+        "200":
+          description: "Success"
+      summary: |
+        Returns the certificate in use by this API.
+      tags:
+        - "System"
   "/open/{filename}":
     post:
       description: |

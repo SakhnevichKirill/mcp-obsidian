@@ -664,6 +664,60 @@ class DataviewQueryToolHandler(ToolHandler):
 
         return list(grouped.values())
 
+
+class DataviewJsToolHandler(ToolHandler):
+    def __init__(self):
+        super().__init__("obsidian_dataviewjs_execute")
+
+    def get_tool_description(self):
+        return Tool(
+            name=self.name,
+            description=(
+                "Executes DataviewJS code and returns rendered HTML/text output from Obsidian. "
+                "Provide the exact DataviewJS snippet you would run inside the app."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "Raw DataviewJS code to execute (e.g., \"await dv.view('path')\")."
+                    },
+                    "file_path": {
+                        "type": "string",
+                        "description": "Optional note path to use as the Dataview execution context.",
+                        "format": "path"
+                    },
+                    "timeout_ms": {
+                        "type": "integer",
+                        "description": "Optional timeout in milliseconds before the execution is aborted (set 0 to disable).",
+                        "minimum": 0
+                    }
+                },
+                "required": ["code"]
+            }
+        )
+
+    def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
+        code = args.get("code")
+
+        if not code or not isinstance(code, str):
+            raise RuntimeError("'code' argument (string) is required for DataviewJS execution")
+
+        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
+        result = api.dataview_js(
+            code=code,
+            file_path=args.get("file_path"),
+            timeout_ms=args.get("timeout_ms")
+        )
+
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps(result, indent=2)
+            )
+        ]
+
 class BatchGetFileContentsToolHandler(ToolHandler):
     def __init__(self):
         super().__init__("obsidian_batch_get_file_contents")

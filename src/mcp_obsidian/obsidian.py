@@ -209,6 +209,39 @@ class Obsidian():
             return response.json()
 
         return self._safe_call(call_fn)
+
+    def dataview_js(
+            self,
+            *,
+            code: str,
+            file_path: str | None = None,
+            timeout_ms: int | None = None
+        ) -> Any:
+        """Execute DataviewJS code via the REST API."""
+
+        if not code or not isinstance(code, str):
+            raise ValueError("'code' must be a non-empty string for dataview_js execution")
+
+        payload: dict[str, Any] = {"code": code}
+        if file_path:
+            payload["filePath"] = file_path
+        if timeout_ms is not None:
+            payload["timeoutMs"] = timeout_ms
+
+        url = f"{self.get_base_url()}/dataviewjs/"
+
+        def call_fn():
+            response = requests.post(
+                url,
+                headers=self._get_headers() | {'Content-Type': 'application/json'},
+                json=payload,
+                verify=self.verify_ssl,
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            return response.json()
+
+        return self._safe_call(call_fn)
     
     def get_periodic_note(self, period: str, type: str = "content") -> Any:
         """Get current periodic note for the specified period.
