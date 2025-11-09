@@ -648,6 +648,15 @@ paths:
         Open the specified document in Obsidian
       tags:
         - "Open"
+  /openapi.yaml:
+    get:
+      responses:
+        "200":
+          description: "Success"
+      summary: |
+        Returns OpenAPI YAML document describing the capabilities of this API.
+      tags:
+        - "System"
   "/periodic/{period}/":
     delete:
       description: |
